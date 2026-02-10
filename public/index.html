@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>多AI狼人杀 6人局</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <main class="container">
+    <h1>🐺 多AI + 用户狼人杀（6人局）</h1>
+    <section class="card">
+      <h2>对局配置（OpenAI兼容协议）</h2>
+      <div class="grid">
+        <label>你的昵称 <input id="userName" value="玩家" /></label>
+        <label>Base URL <input id="baseURL" value="https://api.openai.com/v1" /></label>
+        <label>API Key <input id="apiKey" type="password" placeholder="sk-..." /></label>
+        <label>Model <input id="model" value="gpt-4o-mini" /></label>
+      </div>
+      <p class="tip">不填API配置也能玩（AI将使用本地随机策略）。</p>
+      <button id="startBtn">开始游戏</button>
+    </section>
+
+    <section class="card">
+      <h2>规则（固定6人局）</h2>
+      <ul>
+        <li>角色：2狼人、2村民、1女巫、1预言家。</li>
+        <li>夜晚流程：狼人击杀 → 预言家查验 → 女巫救/毒。</li>
+        <li>白天流程：存活玩家发言 → 全员投票放逐1人。</li>
+        <li>胜利条件：狼人全部出局则好人胜；狼人数量≥其余玩家则狼人胜。</li>
+      </ul>
+    </section>
+
+    <section class="card">
+      <h2>游戏状态</h2>
+      <div id="state"></div>
+      <div id="actionBox" class="action-box hidden"></div>
+      <button id="nextBtn" class="hidden">继续推进</button>
+    </section>
+
+    <section class="card">
+      <h2>日志</h2>
+      <pre id="logs"></pre>
+    </section>
+  </main>
+  <script src="/script.js"></script>
+</body>
+</html>
