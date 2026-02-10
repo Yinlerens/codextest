@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>狼人杀群聊版</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="app">
+    <section class="chat">
+      <header class="chat-header">
+        <h1>🐺 狼人杀群聊房</h1>
+        <div>
+          <button id="startBtn">开始游戏（10人）</button>
+          <button id="refreshBtn">刷新状态</button>
+        </div>
+      </header>
+
+      <div class="rules">
+        <strong>规则环节：</strong>
+        狼人刀人、预言家验人、女巫技能、猎人操作、白痴操作、警长竞选、发言、投票、遗言。
+      </div>
+
+      <div id="meta" class="meta"></div>
+      <div id="messages" class="messages"></div>
+
+      <div id="actionPanel" class="action-panel hidden"></div>
+    </section>
+
+    <aside class="sidebar">
+      <h2>玩家列表（独立 API 配置）</h2>
+      <div id="playersConfig"></div>
+      <p class="tip">要求：每位玩家都必须配置 API，且建议先点“测试通信”。未配置不允许开始游戏。</p>
+    </aside>
+  </div>
+
+  <script src="/script.js"></script>
+</body>
+</html>
