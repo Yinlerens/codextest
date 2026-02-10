@@ -1,0 +1,13 @@
+{
+  "name": "werewolf-multi-ai",
+  "version": "1.0.0",
+  "description": "6人局狼人杀（多AI+用户）基于OpenAI兼容协议",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}
