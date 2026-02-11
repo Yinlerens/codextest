@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>狼人杀群聊版</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="app">
+    <section class="chat">
+      <header class="chat-header">
+        <h1>🐺 狼人杀群聊房（6人固定板子）</h1>
+        <div>
+          <button id="startBtn">开始游戏</button>
+          <button id="refreshBtn">刷新状态</button>
+        </div>
+      </header>
+
+      <div class="rules">
+        <strong>固定角色：</strong>2狼人、2村民、1女巫、1预言家。<br/>
+        <strong>流程：</strong>狼人刀人 → 预言家验人 → 女巫技能 → 发言 → 投票 → 遗言。
+      </div>
+
+      <div id="meta" class="meta"></div>
+      <div id="messages" class="messages"></div>
+      <div id="actionPanel" class="action-panel hidden"></div>
+    </section>
+
+    <aside class="sidebar">
+      <h2>统一模型配置池</h2>
+      <div id="modelsConfig"></div>
+
+      <h2 style="margin-top: 14px;">玩家配置（开局前设角色+选模型）</h2>
+      <div id="playersConfig"></div>
+      <p class="tip">角色总数必须严格为：2狼2民1女巫1预言家。</p>
+    </aside>
+  </div>
+
+  <script src="/script.js"></script>
+</body>
+</html>
