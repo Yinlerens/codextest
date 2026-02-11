@@ -1,11 +1,10 @@
 {
-  "name": "werewolf-multi-ai",
-  "version": "1.0.0",
-  "description": "6人局狼人杀（多AI+用户）基于OpenAI兼容协议",
+  "name": "werewolf-chat-room",
+  "version": "2.0.0",
+  "description": "群聊式狼人杀（多AI+用户），每个玩家独立OpenAI兼容配置",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node server.js"
+    "start": "node server.js"
   },
   "dependencies": {
     "express": "^4.19.2"

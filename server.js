@@ -2,336 +2,465 @@ const express = require('express');
 
 const app = express();
 const port = process.env.PORT || 3000;
-
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json({ limit: '2mb' }));
 app.use(express.static('public'));
 
-const ROLES = ['werewolf', 'werewolf', 'villager', 'villager', 'witch', 'seer'];
-const ROLE_CN = { werewolf: '狼人', villager: '村民', witch: '女巫', seer: '预言家' };
+const ROLE_CN = {
+  wolf: '狼人',
+  villager: '村民',
+  witch: '女巫',
+  seer: '预言家',
+};
+const REQUIRED_ROLE_COUNTS = { wolf: 2, villager: 2, witch: 1, seer: 1 };
 
 let game = null;
 
-const shuffle = (arr) => {
-  const a = [...arr];
-  for (let i = a.length - 1; i > 0; i -= 1) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [a[i], a[j]] = [a[j], a[i]];
+const getPlayer = (id) => game.players.find((p) => p.id === id);
+const alivePlayers = () => game.players.filter((p) => p.alive);
+const aliveByRole = (role) => game.players.filter((p) => p.alive && p.role === role);
+
+function countRoles(players) {
+  const cnt = { wolf: 0, villager: 0, witch: 0, seer: 0 };
+  for (const p of players) {
+    if (cnt[p.role] === undefined) return null;
+    cnt[p.role] += 1;
   }
-  return a;
-};
+  return cnt;
+}
 
-const getPlayer = (state, id) => state.players.find((p) => p.id === id);
-const livingByRole = (state, role) => state.players.filter((p) => p.alive && p.role === role);
+function validateSetup(players, modelConfigs) {
+  if (!Array.isArray(players) || players.length !== 6) return '需要6名玩家';
+  if (!Array.isArray(modelConfigs) || modelConfigs.length < 1) return '至少配置一个模型';
 
-function checkWinner(state) {
-  const wolves = livingByRole(state, 'werewolf').length;
-  const good = state.players.filter((p) => p.alive).length - wolves;
+  const modelMap = new Map();
+  for (const m of modelConfigs) {
+    if (!m.key || !m.baseURL || !m.apiKey || !m.model) return '模型配置必须包含key/baseURL/apiKey/model';
+    modelMap.set(m.key, m);
+  }
+
+  for (const p of players) {
+    if (!p.name || !p.role || !p.modelKey) return '每位玩家都要设置名称、角色、模型';
+    if (!modelMap.has(p.modelKey)) return `${p.name} 选择了不存在的模型`;
+  }
+
+  const cnt = countRoles(players);
+  if (!cnt) return '角色非法';
+  for (const [r, n] of Object.entries(REQUIRED_ROLE_COUNTS)) {
+    if (cnt[r] !== n) return `角色数量不符合要求：${ROLE_CN[r]} 需要 ${n} 人`; 
+  }
+  return null;
+}
+
+function winnerCheck() {
+  const wolves = aliveByRole('wolf').length;
+  const good = alivePlayers().length - wolves;
   if (wolves <= 0) return 'good';
   if (wolves >= good) return 'wolf';
   return null;
 }
 
-function cleanState(state) {
+function publicState() {
   return {
-    day: state.day,
-    phase: state.phase,
-    status: state.status,
-    winner: state.winner,
-    userPlayerId: state.userPlayerId,
-    userRole: getPlayer(state, state.userPlayerId)?.role,
-    players: state.players.map((p) => ({
+    status: game.status,
+    day: game.day,
+    phase: game.phase,
+    step: game.step,
+    userId: game.userId,
+    winner: game.winner,
+    players: game.players.map((p) => ({
       id: p.id,
       name: p.name,
       alive: p.alive,
-      isUser: p.isUser,
-      role: p.alive || p.isUser || state.status === 'ended' ? p.role : null,
+      role: game.status === 'ended' || p.id === game.userId || !p.alive ? p.role : null,
+      modelKey: p.modelKey,
     })),
-    logs: state.logs.slice(-120),
-    pendingAction: state.pendingAction,
+    pending: game.pending,
+    logs: game.logs.slice(-180),
   };
 }
 
-async function callOpenAICompatible(state, systemPrompt, userPrompt) {
-  if (!state.config.apiKey || !state.config.baseURL || !state.config.model) return null;
-  const url = state.config.baseURL.replace(/\/$/, '') + '/chat/completions';
-  try {
-    const resp = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${state.config.apiKey}` },
-      body: JSON.stringify({
-        model: state.config.model,
-        temperature: 0.7,
-        messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }],
-      }),
-    });
-    if (!resp.ok) {
-      state.logs.push(`⚠️ AI接口错误 ${resp.status}: ${(await resp.text()).slice(0, 120)}`);
-      return null;
-    }
-    const data = await resp.json();
-    return data.choices?.[0]?.message?.content?.trim() || null;
-  } catch (err) {
-    state.logs.push(`⚠️ AI接口调用失败: ${err.message}`);
-    return null;
+function log(msg) { game.logs.push(msg); }
+function setPending(payload) { game.pending = payload; }
+function clearPending() { game.pending = null; }
+
+async function callModel(modelCfg, systemPrompt, userPrompt, temperature = 0.7) {
+  const url = modelCfg.baseURL.replace(/\/$/, '') + '/chat/completions';
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${modelCfg.apiKey}` },
+    body: JSON.stringify({
+      model: modelCfg.model,
+      temperature,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+    }),
+  });
+  if (!resp.ok) throw new Error(`模型调用失败: ${resp.status} ${(await resp.text()).slice(0, 120)}`);
+  const data = await resp.json();
+  const out = data.choices?.[0]?.message?.content?.trim();
+  if (!out) throw new Error('模型返回为空');
+  return out;
+}
+
+async function askPlayerChoice(player, instruction, candidates, allowNone = false) {
+  const modelCfg = game.modelMap[player.modelKey];
+  const prompt = `${instruction}\n你是${player.name}(${ROLE_CN[player.role]})。候选：${candidates.map((c) => `${c.id}(${c.name})`).join('、')}。${allowNone ? '可回答SKIP。' : ''}只回答一个ID${allowNone ? '或SKIP' : ''}。`;
+  const text = await callModel(modelCfg, '你在狼人杀中做决策，严格按要求回答。', prompt, 0.4);
+  if (allowNone && /SKIP|放弃|不选/i.test(text)) return null;
+  const up = text.toUpperCase();
+  for (const c of candidates) {
+    if (up.includes(c.id.toUpperCase()) || up.includes(c.name.toUpperCase())) return c.id;
   }
+  throw new Error(`${player.name} 未输出有效目标`);
 }
 
-function extractTargetByName(text, candidates) {
-  if (!text) return null;
-  for (const c of candidates) if (text.includes(c.name)) return c.id;
-  const m = text.match(/P\d+/i);
-  if (m && candidates.some((c) => c.id === m[0].toUpperCase())) return m[0].toUpperCase();
-  return null;
+async function askPlayerSpeech(player, hint = '') {
+  const modelCfg = game.modelMap[player.modelKey];
+  const text = await callModel(modelCfg, '你在狼人杀群聊发言，60字内。', `${hint}\n你是${player.name}，请发言。`, 0.8);
+  return text.slice(0, 120);
 }
 
-async function aiChooseTarget(state, actor, candidates, instruction) {
-  if (candidates.length === 1) return candidates[0].id;
-  const prompt = `${instruction}\n你是${actor.name}(${ROLE_CN[actor.role]})。候选：${candidates
-    .map((c) => `${c.id}(${c.name})`)
-    .join('、')}。只回答一个目标ID或名字。`;
-  const ans = await callOpenAICompatible(state, '你在玩狼人杀，严格按要求输出。', prompt);
-  return extractTargetByName(ans, candidates) || candidates[Math.floor(Math.random() * candidates.length)].id;
-}
-
-async function aiSpeech(state, actor) {
-  const alive = state.players.filter((p) => p.alive).map((p) => p.name).join('、');
-  const prompt = `你在狼人杀白天发言，玩家${actor.name}，身份${ROLE_CN[actor.role]}（仅你知道）。存活:${alive}。输出1-2句中文，不超过45字。`;
-  return (await callOpenAICompatible(state, '你是狼人杀玩家，发言简短自然。', prompt)) || '我建议大家根据昨夜信息谨慎投票。';
-}
-
-function createGame({ userName, apiKey, baseURL, model }) {
-  const names = [userName || '你', 'AI-阿尔法', 'AI-贝塔', 'AI-伽马', 'AI-德尔塔', 'AI-西格玛'];
-  const roles = shuffle(ROLES);
-  return {
-    day: 1,
-    phase: 'night',
-    status: 'running',
-    winner: null,
-    userPlayerId: 'P1',
-    players: names.map((name, idx) => ({ id: `P${idx + 1}`, name, role: roles[idx], alive: true, isUser: idx === 0 })),
-    logs: [
-      '游戏开始：6人局（2狼人、2村民、1女巫、1预言家）。',
-      '规则：夜晚依次狼人刀人->预言家查验->女巫救/毒；白天全员发言并投票放逐。',
-      '胜利条件：所有狼人出局则好人胜；狼人数量≥其余人数则狼人胜。',
-    ],
-    pendingAction: null,
-    night: {
-      step: 'wolf',
-      wolfTarget: null,
-      saveUsed: false,
-      poisonUsed: false,
-      savedTonight: false,
-      poisonedTonight: null,
-    },
-    config: { apiKey: apiKey || '', baseURL: baseURL || '', model: model || '' },
+function nightInit() {
+  game.phase = 'night';
+  game.step = 'wolf_kill';
+  game.night = {
+    wolfVotes: {},
+    wolfTarget: null,
+    seerTarget: null,
+    witchSaved: false,
+    poisonTarget: null,
   };
+  log(`🌙 第${game.day}夜开始：狼人刀人 → 预言家验人 → 女巫技能`);
 }
 
-async function runNight(state) {
-  if (state.night.step === 'wolf') {
-    state.logs.push(`🌙 第${state.day}夜开始。`);
-    const wolves = livingByRole(state, 'werewolf');
-    if (wolves.length) {
-      const candidates = state.players.filter((p) => p.alive && p.role !== 'werewolf');
-      const decider = wolves[Math.floor(Math.random() * wolves.length)];
-      if (decider.isUser) {
-        state.pendingAction = { type: 'wolf_kill', actorId: decider.id, options: candidates.map((c) => ({ id: c.id, name: c.name })), prompt: '你是狼人，请选择今晚刀的目标。' };
+function dayInit() {
+  game.phase = 'day';
+  game.step = 'speech';
+  log(`☀️ 第${game.day}天开始：发言 → 投票 → 遗言`);
+}
+
+function kill(id, reason) {
+  const p = getPlayer(id);
+  if (!p || !p.alive) return;
+  p.alive = false;
+  log(`💀 ${p.name} 出局（${reason}），身份：${ROLE_CN[p.role]}`);
+  game.lastWordsQueue.push(id);
+}
+
+async function runNight() {
+  // 1 狼人刀人（2狼投票，平票随机）
+  if (game.step === 'wolf_kill') {
+    const wolves = aliveByRole('wolf');
+    const candidates = alivePlayers().filter((p) => p.role !== 'wolf');
+    for (const wolf of wolves) {
+      if (wolf.id === game.userId) {
+        setPending({ type: 'wolf_kill', prompt: '狼人刀人：选择目标或放弃', allowAbstain: true, options: candidates.map((c) => ({ id: c.id, name: c.name })) });
         return;
       }
-      state.night.wolfTarget = await aiChooseTarget(state, decider, candidates, '请选择今晚狼队要击杀的目标。');
-      state.logs.push('🐺 狼人在暗中选定了目标。');
+      const pick = await askPlayerChoice(wolf, '狼人夜间请选择击杀目标。', candidates, true);
+      if (pick) game.night.wolfVotes[wolf.id] = pick;
     }
-    state.night.step = 'seer';
+    const votes = Object.values(game.night.wolfVotes);
+    if (votes.length) {
+      const cnt = new Map();
+      for (const v of votes) cnt.set(v, (cnt.get(v) || 0) + 1);
+      let max = 0;
+      for (const n of cnt.values()) max = Math.max(max, n);
+      const tie = [...cnt.entries()].filter(([, n]) => n === max).map(([id]) => id);
+      game.night.wolfTarget = tie[Math.floor(Math.random() * tie.length)];
+      log('🐺 狼人投票完成。');
+    } else {
+      log('🐺 狼人放弃刀人。');
+    }
+    game.step = 'seer_check';
   }
 
-  if (state.night.step === 'seer') {
-    const seer = livingByRole(state, 'seer')[0];
+  // 2 预言家验人
+  if (game.step === 'seer_check') {
+    const seer = aliveByRole('seer')[0];
     if (seer) {
-      const candidates = state.players.filter((p) => p.alive && p.id !== seer.id);
-      if (seer.isUser) {
-        state.pendingAction = { type: 'seer_check', actorId: seer.id, options: candidates.map((c) => ({ id: c.id, name: c.name })), prompt: '你是预言家，请选择要查验的人。' };
+      const candidates = alivePlayers().filter((p) => p.id !== seer.id);
+      if (seer.id === game.userId) {
+        setPending({ type: 'seer_check', prompt: '预言家验人：选择一名玩家查验', options: candidates.map((c) => ({ id: c.id, name: c.name })) });
         return;
       }
-      const targetId = await aiChooseTarget(state, seer, candidates, '请选择你今晚查验的对象。');
-      state.logs.push(`🔮 ${seer.name} 查验了 ${getPlayer(state, targetId).name}。`);
+      game.night.seerTarget = await askPlayerChoice(seer, '预言家夜间请选择查验目标。', candidates);
+      log(`🔮 ${seer.name} 完成查验。`);
     }
-    state.night.step = 'witch';
+    game.step = 'witch_action';
   }
 
-  if (state.night.step === 'witch') {
-    const witch = livingByRole(state, 'witch')[0];
+  // 3 女巫技能（不可自救）
+  if (game.step === 'witch_action') {
+    const witch = aliveByRole('witch')[0];
     if (witch) {
-      const wolfTarget = state.night.wolfTarget ? getPlayer(state, state.night.wolfTarget) : null;
-      if (witch.isUser) {
-        const options = [];
-        if (!state.night.saveUsed && wolfTarget) options.push({ id: 'save', name: `使用解药救 ${wolfTarget.name}` });
-        if (!state.night.poisonUsed) state.players.filter((x) => x.alive && x.id !== witch.id).forEach((p) => options.push({ id: `poison:${p.id}`, name: `使用毒药毒 ${p.name}` }));
-        options.push({ id: 'skip', name: '跳过' });
-        state.pendingAction = { type: 'witch_action', actorId: witch.id, options, prompt: wolfTarget ? `你是女巫，今晚${wolfTarget.name}将被刀。可选择救人、毒人或跳过。` : '你是女巫，可选择毒人或跳过。' };
+      if (witch.id === game.userId) {
+        const options = [{ id: 'skip', name: '跳过' }];
+        if (!game.witch.saveUsed && game.night.wolfTarget && game.night.wolfTarget !== witch.id) {
+          options.push({ id: 'save', name: `使用解药救 ${getPlayer(game.night.wolfTarget).name}` });
+        }
+        if (!game.witch.poisonUsed) {
+          alivePlayers().filter((p) => p.id !== witch.id).forEach((p) => options.push({ id: `poison:${p.id}`, name: `使用毒药毒 ${p.name}` }));
+        }
+        setPending({ type: 'witch_action', prompt: '女巫行动：救/毒/跳过', options });
         return;
       }
-      if (!state.night.saveUsed && wolfTarget && Math.random() < 0.55) {
-        state.night.savedTonight = true;
-        state.night.saveUsed = true;
-        state.logs.push('🧪 女巫使用了解药。');
+
+      const modelCfg = game.modelMap[witch.modelKey];
+      if (!game.witch.saveUsed && game.night.wolfTarget && game.night.wolfTarget !== witch.id) {
+        const t = await callModel(modelCfg, '你是女巫，回答 SAVE 或 SKIP。', `今晚刀口是 ${getPlayer(game.night.wolfTarget).name}，是否使用解药？`, 0.2);
+        if (/SAVE|救/i.test(t)) {
+          game.witch.saveUsed = true;
+          game.night.witchSaved = true;
+          log('🧪 女巫使用了解药。');
+        }
       }
-      if (!state.night.poisonUsed && Math.random() < 0.35) {
-        const candidates = state.players.filter((p) => p.alive && p.id !== witch.id);
-        state.night.poisonedTonight = await aiChooseTarget(state, witch, candidates, '你是女巫，可选择毒一个人。');
-        state.night.poisonUsed = true;
-        state.logs.push('☠️ 女巫在夜里使用了毒药。');
+      if (!game.witch.poisonUsed) {
+        const cands = alivePlayers().filter((p) => p.id !== witch.id);
+        const pick = await askPlayerChoice(witch, '女巫是否使用毒药？可SKIP。', cands, true);
+        if (pick) {
+          game.witch.poisonUsed = true;
+          game.night.poisonTarget = pick;
+          log('☠️ 女巫使用了毒药。');
+        }
       }
     }
-    state.night.step = 'done';
+    game.step = 'night_settle';
   }
 
-  if (state.night.step === 'done') settleNight(state);
-}
+  if (game.step === 'night_settle') {
+    const dead = [];
+    if (game.night.wolfTarget && !game.night.witchSaved) dead.push({ id: game.night.wolfTarget, reason: 'wolf' });
+    if (game.night.poisonTarget) dead.push({ id: game.night.poisonTarget, reason: 'poison' });
+    if (!dead.length) log('🌤️ 平安夜。');
+    for (const d of dead) kill(d.id, d.reason);
 
-function settleNight(state) {
-  const dead = [];
-  if (state.night.wolfTarget && !state.night.savedTonight) {
-    const victim = getPlayer(state, state.night.wolfTarget);
-    if (victim?.alive) { victim.alive = false; dead.push(victim.name); }
-  }
-  if (state.night.poisonedTonight) {
-    const victim = getPlayer(state, state.night.poisonedTonight);
-    if (victim?.alive) { victim.alive = false; dead.push(victim.name); }
-  }
-  state.logs.push(dead.length ? `🌤️ 天亮了，昨夜死亡：${dead.join('、')}。` : '🌤️ 天亮了，昨夜是平安夜。');
-  state.phase = 'day';
-
-  const winner = checkWinner(state);
-  if (winner) {
-    state.status = 'ended';
-    state.winner = winner;
-    state.logs.push(winner === 'good' ? '🎉 好人阵营获胜！' : '🐺 狼人阵营获胜！');
+    const w = winnerCheck();
+    if (w) return endGame(w);
+    dayInit();
   }
 }
 
-async function runDay(state) {
-  state.logs.push(`☀️ 第${state.day}天讨论开始。`);
-  for (const p of state.players.filter((x) => x.alive && !x.isUser)) state.logs.push(`💬 ${p.name}: ${await aiSpeech(state, p)}`);
-
-  const user = getPlayer(state, state.userPlayerId);
-  if (user.alive) {
-    state.pendingAction = {
-      type: 'user_vote', actorId: user.id, withSpeech: true,
-      options: state.players.filter((p) => p.alive && p.id !== user.id).map((p) => ({ id: p.id, name: p.name })),
-      prompt: '请输入你的发言（可选）并选择要投票放逐的玩家。',
-    };
-    return;
+async function runDay() {
+  // 7 发言
+  if (game.step === 'speech') {
+    for (const p of alivePlayers()) {
+      if (p.id === game.userId) {
+        setPending({ type: 'day_speech', prompt: '白天发言：输入你的发言', options: [{ id: 'ok', name: '提交发言' }], withText: true });
+        return;
+      }
+      const sp = await askPlayerSpeech(p, '白天发言阶段');
+      log(`💬 ${p.name}: ${sp}`);
+    }
+    game.step = 'vote';
   }
-  await resolveVoteWithoutUser(state, null);
+
+  // 8 投票
+  if (game.step === 'vote') {
+    const voters = alivePlayers();
+    const score = new Map();
+    for (const v of voters) {
+      const cands = voters.filter((p) => p.id !== v.id);
+      if (v.id === game.userId) {
+        setPending({ type: 'day_vote', prompt: '白天投票：选择放逐对象', options: cands.map((c) => ({ id: c.id, name: c.name })) });
+        return;
+      }
+      const pick = await askPlayerChoice(v, '白天投票请选择放逐对象。', cands);
+      score.set(pick, (score.get(pick) || 0) + 1);
+      log(`🗳️ ${v.name} 投给 ${getPlayer(pick).name}`);
+    }
+
+    let max = 0;
+    let tie = [];
+    for (const [id, n] of score.entries()) {
+      if (n > max) {
+        max = n;
+        tie = [id];
+      } else if (n === max) tie.push(id);
+    }
+    if (tie.length) {
+      const out = tie[Math.floor(Math.random() * tie.length)];
+      kill(out, 'vote');
+    }
+    game.step = 'last_words';
+  }
+
+  // 9 遗言
+  if (game.step === 'last_words') {
+    for (const id of game.lastWordsQueue) {
+      const p = getPlayer(id);
+      if (!p) continue;
+      if (id === game.userId) {
+        setPending({ type: 'last_words', prompt: '遗言（文本模拟120秒）', options: [{ id: 'ok', name: '提交遗言' }], withText: true });
+        return;
+      }
+      const lw = await askPlayerSpeech(p, '你已出局，请发表遗言');
+      log(`🕯️ ${p.name} 遗言: ${lw}`);
+    }
+    game.lastWordsQueue = [];
+
+    const w = winnerCheck();
+    if (w) return endGame(w);
+
+    game.day += 1;
+    nightInit();
+  }
 }
 
-async function resolveVoteWithoutUser(state, forcedUserVote) {
-  const alive = state.players.filter((p) => p.alive);
-  const tally = new Map();
-  for (const actor of alive) {
-    const candidates = alive.filter((p) => p.id !== actor.id);
-    const targetId = actor.isUser && forcedUserVote ? forcedUserVote : await aiChooseTarget(state, actor, candidates, '白天投票阶段，请选择你要放逐的对象。');
-    tally.set(targetId, (tally.get(targetId) || 0) + 1);
-    state.logs.push(`🗳️ ${actor.name} 投票给 ${getPlayer(state, targetId).name}`);
-  }
-  let max = -1; let eliminated = null;
-  for (const [id, c] of tally.entries()) if (c > max) { max = c; eliminated = id; }
-  const out = getPlayer(state, eliminated);
-  if (out) {
-    out.alive = false;
-    state.logs.push(`🚪 ${out.name} 被放逐出局。其身份是：${ROLE_CN[out.role]}。`);
-  }
-
-  const winner = checkWinner(state);
-  if (winner) {
-    state.status = 'ended';
-    state.winner = winner;
-    state.logs.push(winner === 'good' ? '🎉 好人阵营获胜！' : '🐺 狼人阵营获胜！');
-    return;
-  }
-
-  state.day += 1;
-  state.phase = 'night';
-  state.night.step = 'wolf';
-  state.night.savedTonight = false;
-  state.night.poisonedTonight = null;
-  state.night.wolfTarget = null;
+function endGame(winner) {
+  game.status = 'ended';
+  game.winner = winner;
+  log(winner === 'good' ? '🎉 好人阵营获胜' : '🐺 狼人阵营获胜');
 }
 
-async function progressGame(state) {
-  if (state.status !== 'running' || state.pendingAction) return;
-  if (state.phase === 'night') await runNight(state);
-  if (state.status === 'running' && !state.pendingAction && state.phase === 'day') await runDay(state);
+async function progress() {
+  if (!game || game.status !== 'running' || game.pending) return;
+  if (game.phase === 'night') await runNight();
+  if (!game.pending && game.phase === 'day' && game.status === 'running') await runDay();
 }
 
-app.post('/api/new-game', async (req, res) => {
-  const { userName, apiKey, baseURL, model } = req.body || {};
-  game = createGame({ userName, apiKey, baseURL, model });
-  await progressGame(game);
-  res.json(cleanState(game));
+app.post('/api/test-model', async (req, res) => {
+  const { baseURL, apiKey, model } = req.body || {};
+  if (!baseURL || !apiKey || !model) return res.status(400).json({ ok: false, error: 'baseURL/apiKey/model 必填' });
+  try {
+    const out = await callModel({ baseURL, apiKey, model }, '只回复 ok', 'reply ok', 0);
+    res.json({ ok: true, reply: out });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
 });
 
-app.post('/api/next', async (req, res) => {
-  if (!game) return res.status(400).json({ error: '请先开始游戏' });
-  await progressGame(game);
-  res.json(cleanState(game));
+app.post('/api/new-game', async (req, res) => {
+  const { players, modelConfigs } = req.body || {};
+  const err = validateSetup(players, modelConfigs);
+  if (err) return res.status(400).json({ error: err });
+
+  const modelMap = Object.fromEntries(modelConfigs.map((m) => [m.key, m]));
+  game = {
+    status: 'running',
+    winner: null,
+    day: 1,
+    phase: 'night',
+    step: 'wolf_kill',
+    userId: 'P1',
+    modelMap,
+    players: players.map((p, i) => ({
+      id: `P${i + 1}`,
+      name: p.name,
+      role: p.role,
+      modelKey: p.modelKey,
+      alive: true,
+    })),
+    witch: { saveUsed: false, poisonUsed: false },
+    night: {},
+    lastWordsQueue: [],
+    pending: null,
+    logs: [
+      '📜 固定板子：2狼人、2村民、1女巫、1预言家。',
+      '📜 开局前可手动设置每位玩家角色，并选择统一模型配置池中的模型。',
+    ],
+  };
+
+  nightInit();
+  await progress();
+  res.json(publicState());
 });
 
 app.post('/api/action', async (req, res) => {
   if (!game) return res.status(400).json({ error: '请先开始游戏' });
-  const pending = game.pendingAction;
-  if (!pending) return res.status(400).json({ error: '当前没有待处理动作' });
+  if (!game.pending) return res.status(400).json({ error: '当前没有待处理动作' });
 
-  const { actionId, speech } = req.body || {};
+  const { type } = game.pending;
+  const { actionId, text } = req.body || {};
 
-  if (pending.type === 'wolf_kill') {
-    if (!pending.options.some((o) => o.id === actionId)) return res.status(400).json({ error: '非法目标' });
-    game.night.wolfTarget = actionId;
-    game.night.step = 'seer';
-    game.logs.push('🐺 你选择了今晚的击杀目标。');
-    game.pendingAction = null;
-    await progressGame(game);
-    return res.json(cleanState(game));
+  if (type === 'wolf_kill') {
+    if (actionId !== 'skip') game.night.wolfVotes[game.userId] = actionId;
+    clearPending();
+    await progress();
+    return res.json(publicState());
   }
 
-  if (pending.type === 'seer_check') {
-    const target = getPlayer(game, actionId);
-    if (!target?.alive) return res.status(400).json({ error: '非法目标' });
-    game.logs.push(`🔮 你查验了 ${target.name}，其身份是：${ROLE_CN[target.role]}。`);
-    game.night.step = 'witch';
-    game.pendingAction = null;
-    await progressGame(game);
-    return res.json(cleanState(game));
+  if (type === 'seer_check') {
+    const t = getPlayer(actionId);
+    if (!t?.alive) return res.status(400).json({ error: '目标非法' });
+    game.night.seerTarget = actionId;
+    log(`🔮 你查验了 ${t.name}，身份：${ROLE_CN[t.role]}`);
+    clearPending();
+    await progress();
+    return res.json(publicState());
   }
 
-  if (pending.type === 'witch_action') {
-    if (actionId === 'save' && !game.night.saveUsed) {
-      game.night.savedTonight = true;
-      game.night.saveUsed = true;
-      game.logs.push('🧪 你使用了解药。');
-    } else if (actionId?.startsWith('poison:') && !game.night.poisonUsed) {
-      const id = actionId.split(':')[1];
-      const target = getPlayer(game, id);
-      if (!target?.alive) return res.status(400).json({ error: '非法毒杀目标' });
-      game.night.poisonedTonight = id;
-      game.night.poisonUsed = true;
-      game.logs.push(`☠️ 你使用毒药毒死了 ${target.name}。`);
-    } else if (actionId !== 'skip') {
-      return res.status(400).json({ error: '非法操作' });
+  if (type === 'witch_action') {
+    if (actionId === 'save') {
+      if (game.witch.saveUsed) return res.status(400).json({ error: '解药已使用' });
+      game.witch.saveUsed = true;
+      game.night.witchSaved = true;
+      log('🧪 你使用了解药。');
+    } else if (String(actionId).startsWith('poison:')) {
+      if (game.witch.poisonUsed) return res.status(400).json({ error: '毒药已使用' });
+      const id = String(actionId).split(':')[1];
+      if (!getPlayer(id)?.alive) return res.status(400).json({ error: '毒杀目标非法' });
+      game.witch.poisonUsed = true;
+      game.night.poisonTarget = id;
+      log(`☠️ 你毒杀了 ${getPlayer(id).name}`);
     }
-    game.night.step = 'done';
-    game.pendingAction = null;
-    await progressGame(game);
-    return res.json(cleanState(game));
+    clearPending();
+    await progress();
+    return res.json(publicState());
   }
 
-  if (pending.type === 'user_vote') {
-    if (speech) game.logs.push(`💬 你: ${String(speech).slice(0, 80)}`);
-    if (!pending.options.some((o) => o.id === actionId)) return res.status(400).json({ error: '非法投票目标' });
-    game.pendingAction = null;
-    await resolveVoteWithoutUser(game, actionId);
-    await progressGame(game);
-    return res.json(cleanState(game));
+  if (type === 'day_speech') {
+    if (text) log(`💬 你: ${String(text).slice(0, 120)}`);
+    clearPending();
+    await progress();
+    return res.json(publicState());
+  }
+
+  if (type === 'day_vote') {
+    if (!getPlayer(actionId)?.alive) return res.status(400).json({ error: '投票目标非法' });
+    game.userVote = actionId;
+    log(`🗳️ 你投给 ${getPlayer(actionId).name}`);
+    clearPending();
+    // 将用户票写入当轮计票：为简化，直接在下次runDay重新触发前追加处理
+    // 这里通过临时字段在 runDay 内生效
+    game.pendingUserVote = actionId;
+    // 手动结算本轮（因为 runDay 在等待用户时中断）
+    const voters = alivePlayers();
+    const score = new Map();
+    for (const v of voters) {
+      if (v.id === game.userId) {
+        score.set(actionId, (score.get(actionId) || 0) + 1);
+        continue;
+      }
+      const cands = voters.filter((p) => p.id !== v.id);
+      const pick = await askPlayerChoice(v, '白天投票请选择放逐对象。', cands);
+      score.set(pick, (score.get(pick) || 0) + 1);
+      log(`🗳️ ${v.name} 投给 ${getPlayer(pick).name}`);
+    }
+    let max = 0;
+    let tie = [];
+    for (const [id, n] of score.entries()) {
+      if (n > max) {
+        max = n;
+        tie = [id];
+      } else if (n === max) tie.push(id);
+    }
+    if (tie.length) {
+      const out = tie[Math.floor(Math.random() * tie.length)];
+      kill(out, 'vote');
+    }
+    game.step = 'last_words';
+    await progress();
+    return res.json(publicState());
+  }
+
+  if (type === 'last_words') {
+    if (text) log(`🕯️ 你的遗言: ${String(text).slice(0, 180)}`);
+    clearPending();
+    await progress();
+    return res.json(publicState());
   }
 
   return res.status(400).json({ error: '未知动作' });
@@ -339,7 +468,7 @@ app.post('/api/action', async (req, res) => {
 
 app.get('/api/state', (req, res) => {
   if (!game) return res.status(404).json({ error: '暂无游戏' });
-  res.json(cleanState(game));
+  res.json(publicState());
 });
 
-app.listen(port, () => console.log(`Werewolf server running: http://localhost:${port}`));
+app.listen(port, () => console.log(`Werewolf app running at http://localhost:${port}`));
